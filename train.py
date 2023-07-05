@@ -13,9 +13,11 @@ class CastOutputToFloat(nn.Sequential):
     def forward(self, x): return super().forward(x).to(torch.float32)
 
 
+config = AutoConfig.from_pretrained("/home/house365ai/xxm/chatglm2-6b",
+                                    trust_remote_code=True)
 model = AutoModel.from_pretrained("/home/house365ai/xxm/chatglm2-6b",
                                   trust_remote_code=True,
-                                  device_map='auto')
+                                  config=config)
 
 model.supports_gradient_checkpointing = True  # 节约cuda
 model.gradient_checkpointing_enable()

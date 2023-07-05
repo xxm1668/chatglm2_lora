@@ -10,7 +10,7 @@ tokenizer = transformers.AutoTokenizer.from_pretrained(
     model_name, trust_remote_code=True)
 
 config = transformers.AutoConfig.from_pretrained(
-    model_name, trust_remote_code=True, device_map='auto')
+    model_name, trust_remote_code=True)
 
 
 def preprocess(example):
