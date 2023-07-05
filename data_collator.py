@@ -78,3 +78,27 @@ def get_data(ds_train, ds_val):
                                          pin_memory=True, shuffle=True,
                                          collate_fn=data_collator)
     return dl_train, dl_val
+
+
+def preprocess_reward_function(examples):
+    """
+    Turn the dataset into pairs of Question + Answer, where input_ids_chosen is the preferred question + answer
+        and text_rejected is the other.
+    """
+    new_examples = {
+        "input_ids_chosen": [],
+        "attention_mask_chosen": [],
+        "input_ids_rejected": [],
+        "attention_mask_rejected": [],
+    }
+    for question, chosen, rejected in zip(examples["instruction"], examples["output"][0],
+                                          examples["output"][1]):
+        tokenized_chosen = tokenizer("Question: " + question + "\n\nAnswer: " + chosen)
+        tokenized_rejected = tokenizer("Question: " + question + "\n\nAnswer: " + rejected)
+
+        new_examples["input_ids_chosen"].append(tokenized_chosen["input_ids"])
+        new_examples["attention_mask_chosen"].append(tokenized_chosen["attention_mask"])
+        new_examples["input_ids_rejected"].append(tokenized_rejected["input_ids"])
+        new_examples["attention_mask_rejected"].append(tokenized_rejected["attention_mask"])
+
+    return new_examples

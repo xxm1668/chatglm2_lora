@@ -40,3 +40,16 @@ def split_data(filename):
     ds_val = datasets.Dataset.from_list(test)
 
     return ds_train, ds_val
+
+
+def split_reward_data(filename):
+    data = []
+    with open(filename, 'r', encoding='utf-8') as f:
+        lines = f.readlines()
+        for line in lines:
+            line = line.strip()
+            data.append(json.loads(line))
+    dftrain, dftest = train_test_split(data, test_size=0.01, random_state=42)
+    ds_train = datasets.Dataset.from_list(dftrain)
+    ds_val = datasets.Dataset.from_list(dftest)
+    return ds_train, ds_val
