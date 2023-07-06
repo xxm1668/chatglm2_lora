@@ -34,3 +34,7 @@ CUDA_VISIBLE_DEVICES=3 deepspeed --master_port 12345 --num_gpus=1 train2.py \
 
 ####  6、数据集  
 #####  医疗数据集可以参考：https://huggingface.co/datasets/shibing624/medical  
+
+#### 7、reward  
+
+TODO
