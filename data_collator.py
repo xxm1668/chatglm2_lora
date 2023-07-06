@@ -71,10 +71,10 @@ def get_data(ds_train, ds_val):
     if skip_over_length:
         ds_val_token = ds_val_token.filter(
             lambda example: example["context_len"] < max_seq_length and example["target_len"] < max_seq_length)
-    dl_train = torch.utils.data.DataLoader(ds_train_token, num_workers=2, batch_size=4,
+    dl_train = torch.utils.data.DataLoader(ds_train_token, num_workers=2, batch_size=2,
                                            pin_memory=True, shuffle=True,
                                            collate_fn=data_collator)
-    dl_val = torch.utils.data.DataLoader(ds_val_token, num_workers=2, batch_size=4,
+    dl_val = torch.utils.data.DataLoader(ds_val_token, num_workers=2, batch_size=2,
                                          pin_memory=True, shuffle=True,
                                          collate_fn=data_collator)
     return dl_train, dl_val

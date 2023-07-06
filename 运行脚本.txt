@@ -1,0 +1,2 @@
+CUDA_VISIBLE_DEVICES=3 deepspeed --master_port 12345 --num_gpus=1 train.py \
+    ----deepspeed conf/mydeepspeed.json

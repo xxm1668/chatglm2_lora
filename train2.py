@@ -8,13 +8,18 @@ from data_processon import split_data
 from data_collator import get_data
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
 class CastOutputToFloat(nn.Sequential):
     def forward(self, x): return super().forward(x).to(torch.float32)
 
 
-model = AutoModel.from_pretrained("/home/house365ai/xxm/chatglm2-6b",
+config = AutoConfig.from_pretrained("/home/xxm/model/chatglm2-6b",
+                                    trust_remote_code=True)
+model = AutoModel.from_pretrained("/home/xxm/model/chatglm2-6b",
                                   trust_remote_code=True,
-                                  device_map='auto')
+                                  config=config)
 
 model.supports_gradient_checkpointing = True  # 节约cuda
 model.gradient_checkpointing_enable()
@@ -33,31 +38,30 @@ model = get_peft_model(model, peft_config)
 model.is_parallelizable = True
 model.model_parallel = True
 model.print_trainable_parameters()
+
 KerasModel.StepRunner = StepRunner
 KerasModel.save_ckpt = StepRunner.save_ckpt
 KerasModel.load_ckpt = StepRunner.load_ckpt
+lr_scheduler = CosineAnnealingLR(torch.optim.AdamW(model.parameters(), lr=5e-4), T_max=10)
 keras_model = KerasModel(model, loss_fn=None,
-                         optimizer=torch.optim.AdamW(model.parameters(), lr=5e-4))
-
-# 创建学习率调度器
-total_epochs = 50
-lr_scheduler = CosineAnnealingLR(keras_model.optimizer, T_max=total_epochs)
-
-filename = r'/home/house365ai/xxm/chatglm2_lora/data/estate_qa.json'
+                         optimizer=torch.optim.AdamW(model.parameters(), lr=5e-4), lr_scheduler=lr_scheduler)
+keras_model.to(device)
+filename = r'/home/xxm/fsdownload/chatglm2_lora/data/estate_qa.json'
 ds_train, ds_val = split_data(filename)
 dl_train, dl_val = get_data(ds_train, ds_val)
-ckpt_path = '/home/house365ai/xxm/chatglm2_lora/output2'
+for train in dl_train:
+    train['input_ids'].to(device)
+    train['labels'].to(device)
+for val in dl_val:
+    val['input_ids'].to(device)
+    val['labels'].to(device)
+ckpt_path = '/home/xxm/fsdownload/chatglm2_lora/output/estate_qa2'
 
-for epoch in range(total_epochs):
-    keras_model.fit(train_data=dl_train,
-                    val_data=dl_val,
-                    epochs=1,
-                    patience=50,
-                    monitor='val_loss',
-                    mode='min',
-                    ckpt_path=ckpt_path,
-                    mixed_precision='fp16'
-                    )
-
-    # 在每个 epoch 结束时进行学习率调度
-    lr_scheduler.step()
+# val_loss 5轮之后不在下降，将停止训练，如果🚫这么早停止，修改patience
+keras_model.fit(train_data=dl_train,
+                val_data=dl_val,
+                epochs=100, patience=100,
+                monitor='val_loss', mode='min',
+                ckpt_path=ckpt_path,
+                mixed_precision='fp16',
+                )
