@@ -5,7 +5,7 @@ import random
 from tqdm import tqdm
 
 model_path = '/home/house365ai/xxm/chatglm2-6b'
-ckpt_path = '/home/house365ai/xxm/chatglm2_lora/output'
+ckpt_path = '/home/house365ai/xxm/chatglm2_lora/output/estate_qa1'
 model = AutoModel.from_pretrained(model_path,
                                   trust_remote_code=True,
                                   device_map='auto')
@@ -31,8 +31,15 @@ with open(filename, 'r', encoding='utf-8') as f:
         line = line.strip()
         data.append(json.loads(line))
 
-data = random.sample(data, 100)
+target_filename = r'/home/house365ai/xxm/chatglm2_lora/data/prediction.json'
+target_w = open(target_filename, 'a+', encoding='utf-8')
+data = random.sample(data, 500)
 for i, d in enumerate(tqdm(data)):
+    response = predict(d)
+    tmp = {}
     print('query：', d['instruction'])
-    print('response：', predict(d))
+    print('response：', response)
     print('------------')
+    tmp['ori_answer'] = d['output']
+    tmp['pre_answer'] = response
+    target_w.write(json.dumps(tmp, ensure_ascii=False) + '\n')
