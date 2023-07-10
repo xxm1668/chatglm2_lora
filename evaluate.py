@@ -1,54 +1,65 @@
 # -*- coding: utf-8 -*-
 # @Time    : 2023/3/29 11:25
+import json
+
 import numpy as np
-from sacrebleu.metrics import BLEU, BLEUScore
-from rouge import Rouge
+from rouge_chinese import Rouge
 from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
+import jieba
+
+rouge = Rouge()
 
 
-def evaluate(data):
-    bleu_scorer_obj = BLEU()
-    rouge_scorer_obj = Rouge()
-    bleu_score = []
-    for d in data:
-        score = sentence_bleu(list(d['ref']), d['text'],
-                              smoothing_function=SmoothingFunction().method3)
-
-        bleu_score.append(round(score * 100, 4))
-
-    bleu_score = np.average(np.asarray(bleu_score))
-
-    rouge_1_score = []
-    rouge_2_score = []
-    rouge_l_score = []
-    for d in data:
-        score = rouge_scorer_obj.get_scores(
-            hyps=[d['text']],
-            refs=d['ref'],
-        )
-        rouge_1_score.append(score[0]["rouge-1"]["f"])
-        rouge_2_score.append(score[0]["rouge-2"]["f"])
-        rouge_l_score.append(score[0]["rouge-l"]["f"])
-
-    rouge_1_score = np.average(np.asarray(rouge_1_score))
-    rouge_2_score = np.average(np.asarray(rouge_2_score))
-    rouge_l_score = np.average(np.asarray(rouge_l_score))
-
-    return {
-        "bleu_score": bleu_score,
-        "rouge-1_score": rouge_1_score,
-        "rouge-2_score": rouge_2_score,
-        "rouge-l_score": rouge_l_score,
+def compute_metrics(decoded_preds, decoded_labels):
+    score_dict = {
+        "rouge-1": [],
+        "rouge-2": [],
+        "rouge-l": [],
+        "bleu-4": []
     }
+    for pred, label in zip(decoded_preds, decoded_labels):
+        try:
+            if pred:
+                hypothesis = list(jieba.cut(str(pred)))
+                if len(hypothesis) == 0:
+                    hypothesis = ['*****']
+            else:
+                hypothesis = ['*****']
+            if label:
+                reference = list(jieba.cut(str(label)))
+                if len(reference) == 0:
+                    reference = ['*****']
+            else:
+                reference = ['*****']
+
+            scores = rouge.get_scores(' '.join(hypothesis), ' '.join(reference))
+            result = scores[0]
+
+            for k, v in result.items():
+                score_dict[k].append(round(v["f"] * 100, 4))
+            bleu_score = sentence_bleu([list(label)], list(pred), smoothing_function=SmoothingFunction().method3)
+            score_dict["bleu-4"].append(round(bleu_score * 100, 4))
+        except Exception as e:
+            print(e)
+            print(pred)
+            print(label)
+
+    for k, v in score_dict.items():
+        score_dict[k] = float(np.mean(v))
+    return score_dict
 
 
 if __name__ == '__main__':
-    data = [
-        {
-            "text": "to make people trustworthy you need to trust them",
-            "ref": ["the way to make people trustworthy is to trust them"]
-        },
-    ]
+    ori_answer = []
+    pre_answer = []
+    filename = r'/Users/haojingkun/PycharmProjects/chatglm2_lora/data/prediction.json'
+    with open(filename, 'r', encoding='utf-8') as f:
+        lines = f.readlines()
+        for line in lines:
+            line = line.strip()
+            data_json = json.loads(line)
+            ori_answer.append(data_json['ori_answer'])
+            pre_answer.append(data_json['pre_answer'])
 
-    result = evaluate(data)
-    print(result)
+    result = compute_metrics(ori_answer, pre_answer)
+    print(json.dumps(result, ensure_ascii=False, indent=4))
