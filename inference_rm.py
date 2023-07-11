@@ -1,10 +1,33 @@
-from transformers import AutoTokenizer, AutoModelForSequenceClassification, HfArgumentParser
+from transformers import AutoTokenizer, AutoModel, AutoConfig, HfArgumentParser
 import torch
 import json
 import random
 from tqdm import tqdm
 from dataclasses import dataclass, field
 from typing import Optional
+from peft import PeftModel
+from trl import AutoModelForCausalLMWithValueHead
+
+
+class AverageMeter:
+    r"""
+    Computes and stores the average and current value.
+    """
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.val = 0
+        self.avg = 0
+        self.sum = 0
+        self.count = 0
+
+    def update(self, val, n=1):
+        self.val = val
+        self.sum += val * n
+        self.count += n
+        self.avg = self.sum / self.count
 
 
 def get_reward_score(reward_model, reward_tokenizer, question, answer, device):
@@ -12,8 +35,11 @@ def get_reward_score(reward_model, reward_tokenizer, question, answer, device):
     Get the reward score for a given question and answer pair.
     """
     inputs = reward_tokenizer(question, answer, return_tensors='pt').to(device)
-    score = reward_model(**inputs).logits[0].cpu().detach()
-
+    _, _, values = reward_model(**inputs)
+    rewards = [reward for reward in values[-1].to(torch.float32)]
+    reward_meter = AverageMeter()
+    reward_meter.update(torch.stack(rewards).mean().item(), n=len(rewards))
+    score = reward_meter.avg
     return score
 
 
@@ -69,38 +95,74 @@ class ScriptArguments:
         default=0.0, metadata={"help": "Baseline value that is subtracted from the reward"},
     )
     output_dir: Optional[str] = field(default="outputs-rl", metadata={"help": "The output directory"})
+    use_v2: bool = field(default=True, metadata={"help": "Whether to use ChatGLM2-6b"})
 
 
 def main():
     parser = HfArgumentParser(ScriptArguments)
     args = parser.parse_args_into_dataclasses()[0]
-    tokenizer_kwargs = {
-        "cache_dir": args.cache_dir,
-        "use_fast": args.use_fast_tokenizer,
-        "trust_remote_code": args.trust_remote_code,
+    # 加载模型model
+    config_kwargs = {
+        "trust_remote_code": True,
+        "cache_dir": None,
+        "revision": True,
+        "use_auth_token": None,
     }
-    tokenizer_name_or_path = args.tokenizer_name_or_path
-    if not tokenizer_name_or_path:
-        tokenizer_name_or_path = args.model_name_or_path
 
-    torch_dtype = (
-        args.torch_dtype
-        if args.torch_dtype in ["auto", None]
-        else getattr(torch, args.torch_dtype)
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.model_name_or_path,
+        use_fast=True,
+        padding_side="left",
+        **config_kwargs
     )
+
+    config = AutoConfig.from_pretrained(
+        args.model_name_or_path,
+        **config_kwargs
+    )
+
+    model = AutoModel.from_pretrained(args.model_name_or_path, config=config, **config_kwargs)
+
+    # Register auto class to save the custom code files.
+    if hasattr(config, "auto_map") and "AutoConfig" in config.auto_map:
+        config.__class__.register_for_auto_class()
+    if hasattr(config, "auto_map") and "AutoTokenizer" in config.auto_map:
+        tokenizer.__class__.register_for_auto_class()
+    if hasattr(config, "auto_map") and "AutoModel" in config.auto_map:
+        model.__class__.register_for_auto_class()
+
+    if args.use_v2:
+        assert tokenizer.eos_token_id is not None, "Please update the *.json and *.py files of ChatGLM2-6B from HuggingFace."
+        model.lm_head = model.transformer.output_layer
+        output_embedding_base_layer = model.transformer
+        output_embedding_layer_name = "output_layer"
+    else:
+        assert tokenizer.eos_token_id == 130005, "Please specify `use_v2` argument while using ChatGLM2-6B."
+        output_embedding_base_layer = model
+        output_embedding_layer_name = "lm_head"
+
+    for name, param in model.named_parameters():
+        if param.ndim == 1 and any(layer_norm_name in name for layer_norm_name in ["layernorm"]):
+            param.data = param.data.to(torch.float32)
+    model.enable_input_require_grads()
+    model.gradient_checkpointing_enable()
+    model.config.use_cache = False  # turn off when gradient checkpointing is enabled
+    if hasattr(output_embedding_base_layer, output_embedding_layer_name):
+        output_embedding_layer = getattr(output_embedding_base_layer, output_embedding_layer_name)
+        input_dtype = output_embedding_layer.weight.dtype
+
+        class CastOutputToFloat(torch.nn.Sequential):
+            def forward(self, x: torch.Tensor) -> torch.Tensor:
+                return super().forward(x.to(input_dtype)).to(torch.float32)
+
+        setattr(output_embedding_base_layer, output_embedding_layer_name, CastOutputToFloat(output_embedding_layer))
+
+    model = PeftModel.from_pretrained(model, args.reward_model_name_or_path, is_trainable=True)
+    model2 = AutoModelForCausalLMWithValueHead.from_pretrained(model)
+    model2.cuda()
+    model2.eval()
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    reward_model = AutoModelForSequenceClassification.from_pretrained(
-        args.reward_model_name_or_path,
-        load_in_8bit=args.load_in_8bit,
-        cache_dir=args.cache_dir,
-        torch_dtype=torch_dtype,
-    )
-    reward_model.to(device)
-    reward_tokenizer = AutoTokenizer.from_pretrained(
-        args.reward_model_name_or_path, **tokenizer_kwargs
-    )
-
-    reward_filename = r''
+    reward_filename = r'/home/xxm/fsdownload/chatglm2_lora/data/estate_qa.json'
     data = []
     with open(reward_filename, 'r', encoding='utf-8') as f:
         lines = f.readlines()
@@ -109,12 +171,15 @@ def main():
             data.append(json.loads(line))
 
     data = random.sample(data, 100)
-    for d in enumerate(tqdm(data)):
+    for i, d in enumerate(tqdm(data)):
         # Compute reward score
+        question = d['instruction']
+        answer = d['output']
         score_outputs = [
-            get_reward_score(reward_model, reward_tokenizer, q, r, device) for q, r in
-            zip(d["instruction"], d["output"])
+            get_reward_score(model2, tokenizer, question, answer, device)
         ]
-    rewards = [torch.tensor(float(score) - args.reward_baseline) for score in score_outputs]
-    print(rewards)
-    print('---------------')
+        print(score_outputs[0])
+
+
+if __name__ == '__main__':
+    main()

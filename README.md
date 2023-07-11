@@ -37,7 +37,7 @@
 ####  6、数据集  
 * 医疗数据集可以参考：https://huggingface.co/datasets/shibing624/medical  
 
-###  7、base合并Lora权重  
+####  7、base合并Lora权重  
 * 合并脚本  
 > CUDA_VISIBLE_DEVICES=0 python3 merge_lora2base.py \
   --base_model_name_or_path /home/xxm/model/new/chatglm-6b \
@@ -45,7 +45,7 @@
   --output_dir /home/xxm/fsdownload/chatglm2_lora/output/merged_chatglm_lora \
   --model_type chatglm
 
-### 8、reward  
+#### 8、reward奖励模型
 
 * 运行脚本
 > CUDA_VISIBLE_DEVICES=0 python3 reward.py \
@@ -62,3 +62,10 @@
     --reward_filename /home/xxm/fsdownload/chatglm2_lora/data/estate_reward.json \
     --per_device_train_batch_size 8 \
     --fp16
+>
+#### 9、reward推理  
+* 运行脚本
+>CUDA_VISIBLE_DEVICES=0 python3 inference_rm.py \
+    --model_name_or_path /home/xxm/fsdownload/chatglm2_lora/output/merged_chatglm2_lora \
+    --use_v2 \
+    --reward_model_name_or_path /home/xxm/fsdownload/chatglm2_lora/output/reward

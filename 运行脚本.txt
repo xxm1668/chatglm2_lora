@@ -1,6 +1,7 @@
 CUDA_VISIBLE_DEVICES=3 deepspeed --master_port 12345 --num_gpus=1 train.py \
     --deepspeed conf/mydeepspeed.json
 
+###奖励模型-训练
 CUDA_VISIBLE_DEVICES=0 python3 reward.py \
     --lr_scheduler_type cosine \
     --learning_rate 5e-4 \
@@ -16,9 +17,19 @@ CUDA_VISIBLE_DEVICES=0 python3 reward.py \
     --per_device_train_batch_size 8 \
     --fp16
 
+###奖励模型-推理
+CUDA_VISIBLE_DEVICES=0 python3 inference_rm.py \
+    --model_name_or_path /home/xxm/fsdownload/chatglm2_lora/output/merged_chatglm2_lora \
+    --use_v2 \
+    --reward_model_name_or_path /home/xxm/fsdownload/chatglm2_lora/output/reward
+
 
 CUDA_VISIBLE_DEVICES=0 python3 merge_lora2base.py \
   --base_model_name_or_path /home/xxm/model/new/chatglm-6b \
   --peft_model_path /home/xxm/下载/ChatGLM-Efficient-Tuning/output/lora_estate_qa5 \
   --output_dir /home/xxm/fsdownload/chatglm2_lora/output/merged_chatglm_lora \
   --model_type chatglm
+
+
+  wget https://developer.download.nvidia.com/compute/cuda/11.8.0/local_installers/cuda_11.8.0_520.61.05_linux.run
+sudo sh cuda_11.8.0_520.61.05_linux.run
