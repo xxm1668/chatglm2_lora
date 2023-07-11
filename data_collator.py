@@ -1,15 +1,14 @@
-from tqdm import tqdm
 import transformers
 import torch
 
-model_name = "/home/house365ai/xxm/chatglm2-6b"
-max_seq_length = 1024
+model_name = "/home/house365ai/xxm/chatglm2_lora/output/merged_baichuan_lora"
+max_seq_length = 2048
 skip_over_length = True
 
-tokenizer = transformers.AutoTokenizer.from_pretrained(
+tokenizer = transformers.LlamaTokenizer.from_pretrained(
     model_name, trust_remote_code=True)
 
-config = transformers.AutoConfig.from_pretrained(
+config = transformers.LlamaConfig.from_pretrained(
     model_name, trust_remote_code=True)
 
 
@@ -91,8 +90,31 @@ def preprocess_reward_function(examples):
         "input_ids_rejected": [],
         "attention_mask_rejected": [],
     }
-    for question, chosen, rejected in zip(examples["instruction"], examples["output"][0],
-                                          examples["output"][1]):
+    for question, chosen, rejected in zip(examples["instruction"], examples["choose"],
+                                          examples["reject"]):
+        tokenized_chosen = tokenizer("Question: " + question + "\n\nAnswer: " + chosen)
+        tokenized_rejected = tokenizer("Question: " + question + "\n\nAnswer: " + rejected)
+        new_examples["input_ids_chosen"].append(tokenized_chosen["input_ids"])
+        new_examples["attention_mask_chosen"].append(tokenized_chosen["attention_mask"])
+        new_examples["input_ids_rejected"].append(tokenized_rejected["input_ids"])
+        new_examples["attention_mask_rejected"].append(tokenized_rejected["attention_mask"])
+
+    return new_examples
+
+
+def preprocess_reward_function2(examples):
+    """
+    Turn the dataset into pairs of Question + Answer, where input_ids_chosen is the preferred question + answer
+        and text_rejected is the other.
+    """
+    new_examples = {
+        "input_ids_chosen": [],
+        "attention_mask_chosen": [],
+        "input_ids_rejected": [],
+        "attention_mask_rejected": [],
+    }
+    for question, chosen, rejected in zip(examples["question"], examples["response_chosen"],
+                                          examples["response_rejected"]):
         tokenized_chosen = tokenizer("Question: " + question + "\n\nAnswer: " + chosen)
         tokenized_rejected = tokenizer("Question: " + question + "\n\nAnswer: " + rejected)
 

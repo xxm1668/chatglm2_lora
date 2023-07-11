@@ -1,2 +1,24 @@
 CUDA_VISIBLE_DEVICES=3 deepspeed --master_port 12345 --num_gpus=1 train.py \
-    ----deepspeed conf/mydeepspeed.json
+    --deepspeed conf/mydeepspeed.json
+
+CUDA_VISIBLE_DEVICES=0 python3 reward.py \
+    --lr_scheduler_type cosine \
+    --learning_rate 5e-4 \
+    --do_train \
+    --do_eval \
+    --output_dir /home/xxm/fsdownload/chatglm2_lora/output/reward \
+    --use_v2 \
+    --model_path /home/xxm/model/chatglm2-6b \
+    --checkpoint_dir /home/xxm/fsdownload/chatglm2_lora/output/estate_qa0 \
+    --num_train_epochs 5.0 \
+    --save_steps 500 \
+    --reward_filename /home/xxm/fsdownload/chatglm2_lora/data/estate_reward.json \
+    --per_device_train_batch_size 8 \
+    --fp16
+
+
+CUDA_VISIBLE_DEVICES=0 python3 merge_lora2base.py \
+  --base_model_name_or_path /home/xxm/model/new/chatglm-6b \
+  --peft_model_path /home/xxm/下载/ChatGLM-Efficient-Tuning/output/lora_estate_qa5 \
+  --output_dir /home/xxm/fsdownload/chatglm2_lora/output/merged_chatglm_lora \
+  --model_type chatglm

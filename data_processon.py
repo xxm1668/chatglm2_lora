@@ -1,7 +1,7 @@
-import pandas as pd
 import json
 import datasets
 from sklearn.model_selection import train_test_split
+from datasets import load_dataset
 
 
 # 将上下文整理成与推理时候一致，参照model.chat中的源码~
@@ -48,8 +48,28 @@ def split_reward_data(filename):
         lines = f.readlines()
         for line in lines:
             line = line.strip()
-            data.append(json.loads(line))
+            line = json.loads(line)
+            tmp = {}
+            tmp['instruction'] = line['instruction']
+            tmp['input'] = line['input']
+            tmp['history'] = line['history']
+            tmp['choose'] = line['output'][0]
+            tmp['reject'] = line['output'][1]
+            data.append(tmp)
     dftrain, dftest = train_test_split(data, test_size=0.01, random_state=42)
     ds_train = datasets.Dataset.from_list(dftrain)
     ds_val = datasets.Dataset.from_list(dftest)
     return ds_train, ds_val
+
+
+def split_reward_data2(filename):
+    raw_datasets = load_dataset(
+        'json',
+        data_files=filename,
+        cache_dir=None,
+    )
+    return raw_datasets
+
+
+if __name__ == '__main__':
+    split_reward_data('/Users/haojingkun/PycharmProjects/chatglm2_lora/data/estate_reward.json')

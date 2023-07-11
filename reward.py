@@ -4,12 +4,15 @@ import torch
 from typing import Any, List, Union, Optional, Dict
 import os
 from torch.utils.data import Dataset
-from transformers import AutoModel, AutoTokenizer, PreTrainedTokenizerBase, TrainingArguments, HfArgumentParser
-from peft import PeftModel
+from transformers import AutoModel, AutoConfig, AutoTokenizer, PreTrainedTokenizerBase, \
+    TrainingArguments, \
+    HfArgumentParser
 from data_processon import split_reward_data
 from data_collator import preprocess_reward_function
 from dataclasses import dataclass, field
+from trl import AutoModelForCausalLMWithValueHead
 from sklearn.metrics import mean_squared_error, mean_absolute_error
+from peft import LoraConfig, TaskType, get_peft_model, PeftModel
 
 
 @dataclass
@@ -70,6 +73,10 @@ class PeftArguments(TrainingArguments):
     lora_alpha: Optional[float] = field(default=32.0)
     modules_to_save: Optional[str] = field(default=None)
     peft_path: Optional[str] = field(default=None)
+    use_v2: bool = field(default=True, metadata={"help": "Whether to use ChatGLM2-6b"})
+    checkpoint_dir: Optional[str] = field(default=None, metadata={"help": "lora path of model ChatGLM2-6b"})
+    model_path: Optional[str] = field(default=None, metadata={"help": "path of model ChatGLM2-6b"})
+    reward_filename: Optional[str] = field(default=None, metadata={"help": "path of reward filename"})
 
 
 class RewardTrainer(Trainer):
@@ -163,54 +170,152 @@ def save_model(output_dir, model, tokenizer, args):
     torch.save(args, os.path.join(output_dir, TRAINING_ARGS_NAME))
 
 
+def load_valuehead_params(model: torch.nn.Module, checkpoint_dir: os.PathLike) -> bool:
+    print(checkpoint_dir)
+    valuehead_file = os.path.join(checkpoint_dir, "value_head.bin")
+    if not os.path.exists(valuehead_file):
+        print("Provided path ({}) does not contain valuehead weights.".format(checkpoint_dir))
+        return False
+    valuehead_state_dict = torch.load(valuehead_file, map_location="cpu")
+    model.register_buffer("reward_head_weight", valuehead_state_dict["summary.weight"])
+    model.register_buffer("reward_head_bias", valuehead_state_dict["summary.bias"])
+    model.register_buffer("default_head_weight", torch.zeros_like(valuehead_state_dict["summary.weight"]))
+    model.register_buffer("default_head_bias", torch.zeros_like(valuehead_state_dict["summary.bias"]))
+    return True
+
+
+def print_trainable_params(model: torch.nn.Module) -> None:
+    trainable_params, all_param = 0, 0
+    for param in model.parameters():
+        num_params = param.numel()
+        # if using DS Zero 3 and the weights are initialized empty
+        if num_params == 0 and hasattr(param, "ds_numel"):
+            num_params = param.ds_numel
+        all_param += num_params
+        if param.requires_grad:
+            trainable_params += num_params
+    print("trainable params: {:d} || all params: {:d} || trainable%: {:.4f}".format(
+        trainable_params, all_param, 100 * trainable_params / all_param))
+
+
 def main():
     # 加载超参数
-    parser = HfArgumentParser((PeftArguments,))
-    training_args = parser.parse_args_into_dataclasses()
+    parser = HfArgumentParser(PeftArguments)
+    training_args = parser.parse_args_into_dataclasses()[0]
     # 加载模型model
-    model_path = '/home/house365ai/xxm/chatglm2-6b'
-    ckpt_path = '/home/house365ai/xxm/chatglm2_lora/output'
-    model = AutoModel.from_pretrained(model_path,
-                                      trust_remote_code=True,
-                                      device_map='auto')
-    model = model.half()
-    model = PeftModel.from_pretrained(model, ckpt_path)
-    model = model.merge_and_unload()  # 合并lora权重
-    tokenizer = AutoTokenizer.from_pretrained(model_path,
-                                              trust_remote_code=True,
-                                              device_map='auto')
+    config_kwargs = {
+        "trust_remote_code": True,
+        "cache_dir": None,
+        "revision": True,
+        "use_auth_token": None,
+    }
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        training_args.model_path,
+        use_fast=True,
+        padding_side="left",
+        **config_kwargs
+    )
+
+    config = AutoConfig.from_pretrained(
+        training_args.model_path,
+        **config_kwargs
+    )
+
+    model = AutoModel.from_pretrained(training_args.model_path, config=config, **config_kwargs)
+
+    if hasattr(config, "auto_map") and "AutoConfig" in config.auto_map:
+        config.__class__.register_for_auto_class()
+    if hasattr(config, "auto_map") and "AutoTokenizer" in config.auto_map:
+        tokenizer.__class__.register_for_auto_class()
+    if hasattr(config, "auto_map") and "AutoModel" in config.auto_map:
+        model.__class__.register_for_auto_class()
+
+    if training_args.use_v2:
+        assert tokenizer.eos_token_id is not None, "Please update the *.json and *.py files of ChatGLM2-6B from HuggingFace."
+        model.lm_head = model.transformer.output_layer
+        output_embedding_base_layer = model.transformer
+        output_embedding_layer_name = "output_layer"
+    else:
+        assert tokenizer.eos_token_id == 130005, "Please specify `use_v2` argument while using ChatGLM2-6B."
+        output_embedding_base_layer = model
+        output_embedding_layer_name = "lm_head"
+
+    for name, param in model.named_parameters():
+        if param.ndim == 1 and any(layer_norm_name in name for layer_norm_name in ["layernorm"]):
+            param.data = param.data.to(torch.float32)
+
+    model.enable_input_require_grads()
+    model.gradient_checkpointing_enable()
+    model.config.use_cache = False  # turn off when gradient checkpointing is enabled
+
+    if hasattr(output_embedding_base_layer, output_embedding_layer_name):
+        output_embedding_layer = getattr(output_embedding_base_layer, output_embedding_layer_name)
+        input_dtype = output_embedding_layer.weight.dtype
+
+        class CastOutputToFloat(torch.nn.Sequential):
+            def forward(self, x: torch.Tensor) -> torch.Tensor:
+                return super().forward(x.to(input_dtype)).to(torch.float32)
+
+        setattr(output_embedding_base_layer, output_embedding_layer_name, CastOutputToFloat(output_embedding_layer))
+
+    # load lora params
+    lastest_checkpoint = training_args.checkpoint_dir
+
+    if lastest_checkpoint is not None:  # resume lora training
+        model = PeftModel.from_pretrained(model, lastest_checkpoint, is_trainable=True)
+
+    if lastest_checkpoint is None:  # create new lora weights while training
+        lora_config = LoraConfig(
+            task_type=TaskType.CAUSAL_LM,  # we should regard ChatGLM as a causal LM
+            inference_mode=False,
+            r=training_args.lora_rank,
+            lora_alpha=training_args.lora_alpha,
+            lora_dropout=training_args.lora_dropout,
+        )
+        model = get_peft_model(model, lora_config)
+
+    model = AutoModelForCausalLMWithValueHead.from_pretrained(model)
+    # model.v_head.load_state_dict({
+    #     "summary.weight": getattr(model, "reward_head_weight"),
+    #     "summary.bias": getattr(model, "reward_head_bias")
+    # })
+    print_trainable_params(model)
 
     # 加载reward数据
-    reward_filename = r'/home/house365ai/xxm/chatglm2_lora/data/estate_qa_reward.json'
-    ds_train, ds_val = split_reward_data(reward_filename)
+    ds_train, ds_val = split_reward_data(training_args.reward_filename)
+
     tokenized_dataset = ds_train.shuffle().map(
         preprocess_reward_function,
         batched=True,
-        num_proc=2,
+        num_proc=1,
         remove_columns=ds_train.column_names,
         load_from_cache_file=False,
         desc="Running tokenizer on dataset",
     )
     train_dataset = tokenized_dataset.filter(
-        lambda x: 0 < len(x['input_ids_rejected']) <= 1024 and 0 < len(
-            x['input_ids_chosen']) <= 1024
+        lambda x: x is not None and 0 < len(x['input_ids_rejected']) <= 512 and 0 < len(
+            x['input_ids_chosen']) <= 512
     )
 
-    tokenized_dataset = ds_train.shuffle().map(
+    tokenized_dataset = ds_val.shuffle().map(
         preprocess_reward_function,
         batched=True,
-        num_proc=2,
+        num_proc=1,
         remove_columns=ds_val.column_names,
         load_from_cache_file=False,
         desc="Running tokenizer on dataset",
     )
 
     val_dataset = tokenized_dataset.filter(
-        lambda x: 0 < len(x['input_ids_rejected']) <= 1024 and 0 < len(
-            x['input_ids_chosen']) <= 1024
+        lambda x: x is not None and 0 < len(x['input_ids_rejected']) <= 512 and 0 < len(
+            x['input_ids_chosen']) <= 512
     )
+    # 增加不可忽略的字段名
+    training_args.label_names = ['input_ids_chosen', 'attention_mask_chosen', 'input_ids_rejected',
+                                 'attention_mask_rejected']
 
-    # 初始化reward model模型
+    print(training_args)
     trainer = RewardTrainer(
         model=model,
         args=training_args,
@@ -219,15 +324,16 @@ def main():
         tokenizer=tokenizer,
         compute_metrics=compute_metrics,
         data_collator=RewardDataCollatorWithPadding(
-            tokenizer=tokenizer, max_length=1024, padding="max_length"
+            tokenizer=tokenizer, max_length=512, padding="max_length"
         ),
+
     )
 
     # training
     checkpoint = None
     if training_args.resume_from_checkpoint is not None:
         checkpoint = training_args.resume_from_checkpoint
-    train_result = trainer.train(resume_from_checkpoint=checkpoint)
+    train_result = trainer.train(checkpoint)
 
     # saving
     metrics = train_result.metrics
@@ -238,3 +344,7 @@ def main():
     print(f"Saving model checkpoint to {training_args.output_dir}")
     save_model(training_args.output_dir, model, tokenizer, training_args)
     print('---------finsh--------')
+
+
+if __name__ == '__main__':
+    main()
